@@ -1,0 +1,167 @@
+/*
+ * ZeroNet.h
+ *
+ *  Created on: Dec 8, 2016
+ *      Author: zys
+ */
+#ifndef ZERONET_H_
+#define ZERONET_H_
+
+#include "Resource.h"
+#include "thread.h"
+#include "queue.h"
+#include "sync.h"
+
+class Layer;
+class ZeroMessage;
+class LayerParam;
+class ZeroThread;
+class DataLayer;
+class FullConnLayer;
+class NetParam;
+class DataLayer;
+
+class ZeroNet: public Thread {
+
+	vector<LayerParam*> mv_layerParamVec;
+	vector<ZeroThread*> mv_zeroThreadVec;
+	ThreadSynchronizer* mp_sync;
+	vector<Layer*> mv_layerVec;
+	Queue<ZeroMessage*> mq_netMsgQue;
+
+	NetParam* mp_netParam;
+	int mi_executedBatchNumber;
+
+	//17.02.23
+	DataLayer* mp_dataLayer;
+	//vector<double*> _layerDeviceOutData;
+
+private:
+	ZeroNet();
+	ZeroNet(const ZeroNet &);
+	ZeroNet& operator =(const ZeroNet &);
+	void* run();
+	void NetForward();
+	void NetBackward();
+	void NetParalleUpdate();
+	void NetSyncWithChildThreads();
+
+	void CreateLayers();
+	void ConnectAdjacentLayers();
+	void AllocLayerMemory();
+
+public:
+
+	virtual ~ZeroNet();
+
+	static ZeroNet& getInstance() {
+		static ZeroNet instance;
+		return instance;
+	}
+public:
+
+	vector<ZeroThread*>& getZeroThreadVec() {
+		return mv_zeroThreadVec;
+	}
+	ThreadSynchronizer* getSync() {
+		return mp_sync;
+	}
+
+	Queue<ZeroMessage*>& getNetMsgQue() {
+		return mq_netMsgQue;
+	}
+	vector<Layer*>& getLayerVec() {
+		return mv_layerVec;
+	}
+
+	NetParam* getNetParam() {
+		return mp_netParam;
+	}
+	int getExecutedBatchNumber() {
+		return mi_executedBatchNumber;
+	}
+
+	inline Layer* getLayerById(int index) {
+
+		static int size=mv_layerVec.size();
+		if(index<=-1 || index>=size){
+			return NULL;
+		}
+		return mv_layerVec[index];
+	}
+
+	DataLayer* getDataLayer(){
+		return mp_dataLayer;
+	}
+};
+
+class ZeroThread: public Thread {
+
+	Queue<ZeroMessage*> mq_msgQue;
+	Layer* mp_bindLayer;
+
+
+public:
+
+	ZeroThread(LayerParam* layerParam);
+
+	ZeroThread();
+
+	virtual ~ZeroThread();
+
+	Queue<ZeroMessage*>& getMsgQueue() {
+		return mq_msgQue;
+	}
+
+	Layer* getBindLayer() {
+		return mp_bindLayer;
+	}
+
+private:
+
+	void* run();
+
+};
+
+class NetParam {
+
+private:
+	int mi_batchSize;
+	int mi_totalBatchNumber;
+	int mi_fragmentNumber;
+	int mi_totalLayerNumber;
+
+public:
+	NetParam(int batchSize, int fragmentNum, int totalBatchNum, int totalLayerNum) {
+		assert((batchSize % fragmentNum) == 0);
+		mi_batchSize = batchSize;
+		mi_totalBatchNumber = totalBatchNum;
+		mi_fragmentNumber = fragmentNum;
+		mi_totalLayerNumber = totalLayerNum;
+	}
+
+	NetParam(string filePath) {
+		mi_batchSize = 300;
+		mi_totalBatchNumber = 300;
+		mi_fragmentNumber = 3;
+		mi_totalLayerNumber = 0;
+	}
+
+	int getBatchSize() {
+		return mi_batchSize;
+	}
+
+	int getTotalBatchNumber() {
+		return mi_totalBatchNumber;
+	}
+
+	int getFragmentNumber() {
+		return mi_fragmentNumber;
+	}
+
+	int getTotalLayerNumber() {
+		return mi_totalLayerNumber;
+	}
+
+};
+#endif

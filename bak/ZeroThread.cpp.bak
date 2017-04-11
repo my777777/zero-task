@@ -1,0 +1,48 @@
+///*
+// * ZeroThread.cpp
+// *
+// *  Created on: Dec 19, 2016
+// *      Author: zys
+// */
+//
+//#include "ZeroThread.h"
+//
+//ZeroThread::ZeroThread(LayerParam* layerParam,ZeroNet* zeroNet) :
+//		Thread(true) {
+//	LayerType type = layerParam->getLayerType();
+//	if (type == LAYER_TYPE_INPUT) {
+//		_bindLayer = new DataLayer(layerParam, this);
+//	} else if (type == LAYER_TYPE_FULL) {
+//		_bindLayer = new FullConnLayer(layerParam, this);
+//	}
+//	_zeroNet=zeroNet;
+//}
+//
+//ZeroThread::~ZeroThread() {
+//	LOG_IF(INFO,gb_logFlag) << __func__;
+//}
+//
+//void* ZeroThread::run() {
+//
+//	bool exit = false;
+//	while (!exit) {
+//		ZeroMessage* m = _msgQue.dequeue();
+//		//LOG_IF(INFO,gb_logFlag)<<_bindLayer->getLayerName()<<" Len:"<<_msgQue.getNumElements()<<";Type:"<<m->getType();
+//		MESSAGES type=m->getType();
+//		if(type==FPROP_READY){
+//			//LOG_IF(INFO,gb_logFlag)<<_bindLayer->getLayerName()<<"---------FPROP_READY Type:"<<type;
+//			_bindLayer->Forward();
+//		}else if(type==BPROP_READY){
+//			//LOG_IF(INFO,gb_logFlag)<<_bindLayer->getLayerName()<<"---------BPROP_READY Type:"<<type;
+//			_bindLayer->Backward();
+//		}else if(type==EXIT_CONVNET){
+//			//LOG_IF(INFO,gb_logFlag)<<_bindLayer->getLayerName()<<"---------EXIT_CONVNET Type:"<<type;
+//			exit=true;
+//		}else if(type==SYNC_BEGIN){
+//			_zeroNet->getSync()->sync();
+//		}
+//		delete m;
+//	}
+//	return NULL;
+//}
+//

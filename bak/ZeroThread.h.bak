@@ -1,0 +1,20 @@
+/*
+ * ZeroThread.h
+ *
+ *  Created on: Dec 19, 2016
+ *      Author: zys
+ */
+
+#ifndef ZEROTHREAD_H_
+#define ZEROTHREAD_H_
+
+#include "Resource.h"
+#include "thread.h"
+#include "queue.h"
+#include "ZeroMessage.h"
+#include "Layer.h"
+#include "DataLayer.h"
+#include "FullConnLayer.h"
+
+
+#endif /* ZEROTHREAD_H_ */

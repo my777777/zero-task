@@ -1,0 +1,337 @@
+/*
+ * FullConnLayer.cpp
+ *
+ *  Created on: Dec 8, 2016
+ *      Author: zys
+ */
+
+#include "FullConnLayer.h"
+#include "ZeroLogger.h"
+#include "ZeroMessage.h"
+#include "FileHandle.h"
+#include "Filler.h"
+#include "Shape.h"
+FullConnLayer::FullConnLayer(LayerParam* layerParam, ZeroThread* thread) :
+		Layer(layerParam, thread) {
+	LOG_IF(INFO,gb_logFlag) << this->getLayerName() << ":" << __func__;
+	checkCublasErrors(cublasCreate(&m_cublasHandle));
+	if (mi_streams != 0) {
+		checkCublasErrors(cublasSetStream(m_cublasHandle,mp_cudaStreams[0]));
+	}
+}
+
+FullConnLayer::~FullConnLayer() {
+	LOG_IF(INFO,gb_logFlag) << this->getLayerName() << ":" << __func__;
+	checkCudaErrors(cudaSetDevice(getGpuIndex()));
+	checkCublasErrors(cublasDestroy(m_cublasHandle));
+	ExeMemoryRelease();
+}
+
+void FullConnLayer::ExeMemoryAlloc() {
+
+	long outDataSize = gi_batchSize * getOutMapsOrNeurons();
+	checkCudaErrors(cudaMalloc((void** )&mp_deviceOutData, outDataSize * sizeof(double)));
+	checkCudaErrors(cudaMemset(mp_deviceOutData, 0, outDataSize * sizeof(double)));
+
+	long outDiffSize = gi_batchSize * getInMapsOrNeurons();
+	checkCudaErrors(cudaMalloc((void** )&mp_deviceOutDiff, outDiffSize * sizeof(double)));
+	checkCudaErrors(cudaMemset(mp_deviceOutDiff, 0, outDiffSize * sizeof(double)));
+
+	// if data malloc on different devices,need copy.
+	if (getPrevLayer()->getGpuIndex() != getGpuIndex()) {
+		long prevLayerFragmentOutDataSize = getFragmentSize() * getInMapsOrNeurons();
+		checkCudaErrors(cudaMalloc((void** )&mp_prevLayerFragmentOutData, prevLayerFragmentOutDataSize * sizeof(double)));
+		checkCudaErrors(cudaMemset(mp_prevLayerFragmentOutData, 0, prevLayerFragmentOutDataSize * sizeof(double)));
+	}
+	if(getNextLayer()->getGpuIndex()!=getGpuIndex()){
+		long nextLayerFragmentInDiffSize = getFragmentSize() * getOutMapsOrNeurons();
+		checkCudaErrors(cudaMalloc((void** )&mp_nextLayerFragmentOutDiff, nextLayerFragmentInDiffSize * sizeof(double)));
+		checkCudaErrors(cudaMemset(mp_nextLayerFragmentOutDiff, 0, nextLayerFragmentInDiffSize * sizeof(double)));
+	}
+
+	long weightSize = getOutMapsOrNeurons() * getInMapsOrNeurons();
+	checkCudaErrors(cudaMalloc((void** )&mp_deviceWeight, weightSize * sizeof(double)));
+	checkCudaErrors(cudaMalloc((void** )&mp_deviceWeightGradient, weightSize * sizeof(double)));
+	checkCudaErrors(cudaMalloc((void** )&mp_historyWeightGradient, weightSize * sizeof(double)));
+	checkCudaErrors(cudaMemset(mp_historyWeightGradient, 0, weightSize * sizeof(double)));
+
+//	cudnn::MSRAFiller filler;
+//	int v[] = { getOutMapsOrNeurons(), getInMapsOrNeurons()};
+//	cudnn::Shape shape(2, v);
+//	filler.Fill(mp_deviceWeight, shape);
+
+	double* hostWeight = new double[weightSize];
+	for (int i = 0; i < weightSize; ++i) {
+		hostWeight[i] = rand() % 3;
+	}
+	checkCudaErrors(cudaMemcpy(mp_deviceWeight, hostWeight, weightSize * sizeof(double), cudaMemcpyHostToDevice));
+	delete[] hostWeight;
+
+	long biasSize = getOutMapsOrNeurons();
+	checkCudaErrors(cudaMalloc((void** )&mp_deviceBias, biasSize * sizeof(double)));
+	checkCudaErrors(cudaMalloc((void** )&mp_deviceBiasGradient, biasSize * sizeof(double)));
+	checkCudaErrors(cudaMalloc((void** )&mp_historyBiasGradient, biasSize * sizeof(double)));
+	checkCudaErrors(cudaMemset(mp_historyBiasGradient, 0, biasSize * sizeof(double)));
+
+//	cudnn::ConstantFiller biasFiller;
+//	int biasV[] = { getOutMapsOrNeurons() };
+//	cudnn::Shape biasShape(1, biasV);
+//	biasFiller.Fill(mp_deviceBias, biasShape);
+
+	double *bias = new double[biasSize];
+	for (int i = 0; i < biasSize; ++i) {
+		bias[i] = rand() % 3;
+	}
+	checkCudaErrors(cudaMemcpy(mp_deviceBias, bias, biasSize * sizeof(double), cudaMemcpyHostToDevice));
+	delete[] bias;
+
+	long size = getFragmentSize();
+	checkCudaErrors(cudaMalloc((void** )&mp_biasMultiplier, size * sizeof(double)));
+	double* biasMultiplier = new double[size];
+	for (int i = 0; i < size; i++) {
+		biasMultiplier[i] = 1;
+	}
+	checkCudaErrors(cudaMemcpy((void* )mp_biasMultiplier, (const void* )biasMultiplier, size * sizeof(double), cudaMemcpyHostToDevice));
+	delete biasMultiplier;
+}
+
+void FullConnLayer::ExeMemoryRelease() {
+
+	if (mp_deviceOutData != NULL) {
+		checkCudaErrors(cudaFree(mp_deviceOutData));
+		mp_deviceOutData = NULL;
+	}
+
+	if (mp_deviceWeight != NULL) {
+		checkCudaErrors(cudaFree(mp_deviceWeight));
+		mp_deviceWeight = NULL;
+	}
+
+	if (mp_deviceOutDiff != NULL) {
+		checkCudaErrors(cudaFree(mp_deviceOutDiff));
+		mp_deviceOutDiff = NULL;
+	}
+	if (mp_deviceWeightGradient != NULL) {
+		checkCudaErrors(cudaFree(mp_deviceWeightGradient));
+		mp_deviceWeightGradient = NULL;
+	}
+
+	if (mp_historyWeightGradient != NULL) {
+		checkCudaErrors(cudaFree(mp_historyWeightGradient));
+		mp_historyWeightGradient = NULL;
+	}
+	if (mp_deviceBias != NULL) {
+		checkCudaErrors(cudaFree(mp_deviceBias));
+		mp_deviceBias = NULL;
+	}
+
+	if (mp_deviceBiasGradient != NULL) {
+		checkCudaErrors(cudaFree(mp_deviceBiasGradient));
+		mp_deviceBiasGradient = NULL;
+	}
+
+	if (mp_historyBiasGradient != NULL) {
+		checkCudaErrors(cudaFree(mp_historyBiasGradient));
+		mp_historyBiasGradient = NULL;
+	}
+
+	if (mp_nextLayerFragmentOutDiff != NULL) {
+		checkCudaErrors(cudaFree(mp_nextLayerFragmentOutDiff));
+		mp_nextLayerFragmentOutDiff = NULL;
+	}
+
+	if (mp_prevLayerFragmentOutData != NULL) {
+		checkCudaErrors(cudaFree(mp_prevLayerFragmentOutData));
+		mp_prevLayerFragmentOutData = NULL;
+	}
+}
+
+void FullConnLayer::ExeForward(int fragment) {
+	LOG_IF(INFO,gb_logFlag) <<getLayerName() << ":" << __func__ << "; fragment " << fragment << ";fragmentNumber:"<<getFragmentNumber();
+	Layer* prevLayer = getPrevLayer();
+	assert(prevLayer!=NULL);
+
+
+	int outNeurons = getOutMapsOrNeurons();
+	int fragmentSize = getFragmentSize();
+	int inNeurons = getInMapsOrNeurons();
+
+	int inDataOffset = fragment * fragmentSize * inNeurons;
+	int outDataOffset = fragment * fragmentSize * outNeurons;
+
+	double* prevLayerFragmentOutData = NULL;
+	if (prevLayer->getGpuIndex() != getGpuIndex()) {
+		checkCudaErrors(cudaMemcpy(mp_prevLayerFragmentOutData, prevLayer->getDeviceOutData() + inDataOffset, getFragmentSize() * getInMapsOrNeurons() * sizeof(double), cudaMemcpyDeviceToDevice));
+		prevLayerFragmentOutData = mp_prevLayerFragmentOutData;
+	} else {
+		prevLayerFragmentOutData = prevLayer->getDeviceOutData() + inDataOffset;
+	}
+	ZeroLogger::LogIfInfo(gb_logDataFlag,mp_deviceOutData + outDataOffset, fragmentSize, outNeurons, getLayerName() + " outData:");
+
+
+	/*
+	 * calculate bias: mp_deviceOutData=mp_biasMultiplier*mp_deviceBias
+	 * mp_biasMultiplier:dim(fragmentSize*1)
+	 * mp_deviceBias:dim(1*outNeurons)
+	 * mp_deviceOutData:(fragmentSize*outNeurons)
+	 */
+	double alpha = 1.0;
+	double beta = 0.0;
+	checkCublasErrors(cublasDgemm (m_cublasHandle,CUBLAS_OP_N,CUBLAS_OP_N, //
+			outNeurons,fragmentSize,1,//
+			&alpha,mp_deviceBias,outNeurons,//
+			mp_biasMultiplier,1,//
+			&beta,mp_deviceOutData+outDataOffset,outNeurons//
+			));
+	ZeroLogger::LogIfInfo(gb_logDataFlag,mp_deviceBias, 1, outNeurons, getLayerName() + " bias:");
+	ZeroLogger::LogIfInfo(gb_logDataFlag,mp_deviceOutData + outDataOffset, fragmentSize, outNeurons, getLayerName() + " outData:");
+	/*
+	 * calculate outData:mp_deviceOutData=inData*weight+mp_deviceOutData
+	 * inData:dim(fragmentSize*inNeurons)
+	 * weight:dim(outNeurons*inNeurons)
+	 * mp_deviceOutData:dim(fragmentSize*outNeurons)
+	 */
+	beta = 1.0;
+	checkCublasErrors(cublasDgemm(m_cublasHandle,CUBLAS_OP_T,CUBLAS_OP_N, //
+			outNeurons,fragmentSize,inNeurons,//
+			&alpha,mp_deviceWeight,inNeurons,//
+			prevLayerFragmentOutData,inNeurons,//
+			&beta,mp_deviceOutData+outDataOffset,outNeurons));
+	ZeroLogger::LogIfInfo(gb_logDataFlag,prevLayer->getDeviceOutData() + inDataOffset, fragmentSize, inNeurons, getLayerName() + " inData:");
+	ZeroLogger::LogIfInfo(gb_logDataFlag,mp_deviceWeight, outNeurons, inNeurons, getLayerName() + " weightData:");
+	ZeroLogger::LogIfInfo(gb_logDataFlag,mp_deviceOutData + outDataOffset, fragmentSize, outNeurons, getLayerName() + " outData:");
+	//CheckMXM(prevLayer->getDeviceOutData() + prevOffset,prevRows*prevCols,mp_deviceWeight,getOutMapsOrNeurons()*getInMapsOrNeurons(),mp_deviceOutData + curOffset,n*m);
+
+}
+
+void FullConnLayer::ExeBackward(int fragment) {
+
+	LOG_IF(INFO,gb_logFlag) <<getLayerName() << ":" << __func__ << "; fragment " << fragment << ";fragmentNumber:"<<getFragmentNumber();
+	Layer* nextLayer = getNextLayer();
+	Layer* prevLayer = getPrevLayer();
+	assert(prevLayer!= NULL && nextLayer!=NULL);
+
+	int outNeurons = getOutMapsOrNeurons();
+	int fragmentSize = getFragmentSize();
+	int inNeurons = getInMapsOrNeurons();
+	int inDataOffset = fragment * fragmentSize * inNeurons;
+	int outDataOffset = fragment * fragmentSize * outNeurons;
+	int inDiffOffset = outDataOffset;
+	int outDiffOffset = inDataOffset;
+
+	double* nextLayerFragmentInDiff = NULL;
+	double* prevLayerFragmentOutData = NULL;
+	if (nextLayer->getGpuIndex() != getGpuIndex()) {
+		assert(mp_nextLayerFragmentOutDiff!=NULL);
+		checkCudaErrors(cudaMemcpy(mp_nextLayerFragmentOutDiff, nextLayer->getDeviceOutDiff() + inDiffOffset, getFragmentSize() * getOutMapsOrNeurons() * sizeof(double), cudaMemcpyDeviceToDevice));
+		nextLayerFragmentInDiff = mp_nextLayerFragmentOutDiff;
+	} else {
+		nextLayerFragmentInDiff = nextLayer->getDeviceOutDiff() + inDiffOffset;
+	}
+
+	if(prevLayer->getGpuIndex()!=getGpuIndex()){
+		prevLayerFragmentOutData = mp_prevLayerFragmentOutData;
+	}else{
+		prevLayerFragmentOutData = prevLayer->getDeviceOutData() + inDataOffset;
+	}
+
+	/*
+	 * calculate outDiff: inDiff*weight
+	 *  inDiff matrix,	dimA(fragmentSize*outNeurons)
+	 *  weight matrix , dimB(outNeurons*inNeurons),
+	 *  outDiff matrix , dimC(fragmentSize*inNeurons)
+	 */
+	double alpha = 1.0;
+	double beta = 0.0;
+	checkCublasErrors(cublasDgemm (m_cublasHandle, CUBLAS_OP_N, CUBLAS_OP_N, //
+			inNeurons,fragmentSize,outNeurons,//
+			&alpha,mp_deviceWeight, inNeurons,//
+			nextLayerFragmentInDiff,outNeurons,//
+			&beta,mp_deviceOutDiff+outDiffOffset, inNeurons));
+	/*
+	 * calculate mp_deviceWeightGradient: inDiff* deviceInData(mp_preLayer->mp_deviceOutData)
+	 * inDiff:dim(fragmentSize*outNeurons)
+	 * deviceInData :dim(fragmentSize*inNeurons)
+	 * mp_deviceWeightGradient:dim(outNeurons*inNeurons)
+	 *
+	 * if fragment!=0 ,then beta=1.0(add current result to previous result).
+	 */
+	beta = (fragment) ? 1.0 : 0.0;
+	checkCublasErrors(cublasDgemm (m_cublasHandle, CUBLAS_OP_N,CUBLAS_OP_T, //
+			inNeurons,outNeurons,fragmentSize,//
+			&alpha,prevLayerFragmentOutData,inNeurons,//
+			nextLayerFragmentInDiff,outNeurons,//
+			&beta,mp_deviceWeightGradient,inNeurons));
+	/*
+	 * Calculate mp_deviceBiasGradient: mp_biasMultiplier*inDiff
+	 *	mp_biasMultiplier:dim(fragmentSize*1)
+	 *	inDiff:dim(fragmentSize*outNeurons)
+	 *	mp_deviceBiasGradient:dim(outNeurons*1)
+	 *
+	 *	if fragment!=0 ,then beta=1.0(add current result to previous result).
+	 */
+	beta = (fragment) ? 1.0 : 0.0;
+	checkCublasErrors(cublasDgemm (m_cublasHandle,CUBLAS_OP_N,CUBLAS_OP_N, //
+			outNeurons,1,fragmentSize,//
+			&alpha,nextLayerFragmentInDiff,outNeurons,//
+			mp_biasMultiplier,fragmentSize,//
+			&beta,mp_deviceBiasGradient,outNeurons//
+			));
+}
+
+void FullConnLayer::ExeUpdate(int fragment) {
+	LOG_IF(INFO,gb_logFlag) <<getLayerName() << ":" << __func__ << "; fragment " << fragment << ";fragmentNumber:"<<getFragmentNumber();
+}
+
+bool FullConnLayer::CheckMXM(double* A, int sizeA, double *B, int sizeB, double *C, int sizeC) {
+
+	assert(sizeA != 0);
+	assert(sizeB != 0);
+	assert(sizeC != 0);
+
+	cout << sizeA << ":" << sizeB << ":" << sizeC << endl;
+
+	double *a = new double[sizeA];
+	double *b = new double[sizeB];
+	double *c = new double[sizeC];
+
+	checkCudaErrors(cudaMemcpy(a, A, sizeA * sizeof(double), cudaMemcpyDeviceToHost));
+	checkCudaErrors(cudaMemcpy(b, B, sizeB * sizeof(double), cudaMemcpyDeviceToHost));
+	checkCudaErrors(cudaMemcpy(c, C, sizeC * sizeof(double), cudaMemcpyDeviceToHost));
+
+	double *tmp = new double[sizeC];
+
+	int oCol = 0;
+
+	for (int iRow = 0; iRow < gi_batchSize; ++iRow) {
+
+		oCol = 0;
+
+		for (int wRow = 0; wRow < getOutMapsOrNeurons(); ++wRow) {
+
+			tmp[iRow * getOutMapsOrNeurons() + oCol] = 0;
+
+			for (int wCol = 0; wCol < getInMapsOrNeurons(); ++wCol) {
+
+				tmp[iRow * getOutMapsOrNeurons() + oCol] += a[iRow * getInMapsOrNeurons() + wCol] * b[wRow * getInMapsOrNeurons() + wCol];
+
+			}
+			oCol++;
+		}
+	}
+
+	for (int i = 0; i < sizeC; ++i) {
+		if (c[i] != tmp[i]) {
+			LOG_IF(INFO,gb_logFlag) << "Matrix Multi Matrix Is Incorrectness";
+			//ZeroNet::getInstance()->getNetMsgQue().enqueue(new ZeroMessage(NET_CAN_EXIT));
+			ZeroNet::getInstance().getNetMsgQue().enqueue(new ZeroMessage(NET_CAN_EXIT));
+		}
+	}
+	//ZeroLogger::LogIfInfoHost(c, gi_batchSize, getOutMapsOrNeurons(), getLayerName() + " C:", gb_logFlag);
+
+	delete[] a;
+	delete[] b;
+	delete[] c;
+	delete[] tmp;
+	return false;
+}

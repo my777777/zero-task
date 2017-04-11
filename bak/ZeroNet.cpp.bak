@@ -1,0 +1,243 @@
+/*
+ * ZeroNet.cpp
+ *
+ *  Created on: Dec 8, 2016
+ *      Author: zys
+ */
+#include "ZeroNet.h"
+#include "Layer.h"
+#include "ZeroMessage.h"
+#include "DataLayer.h"
+#include "FullConnLayer.h"
+#include "SoftmaxLayer.h"
+#include "ReLULayer.h"
+#include "ConvLayer.h"
+#include "PoolLayer.h"
+#include "LayerFactory.h"
+
+ZeroNet::ZeroNet() :
+		Thread(true, "ZeroNet") {
+
+	LOG_IF(INFO,gb_logFlag) << __func__;
+
+	CreateLayers();
+	ConnectAdjacentLayers();
+	AllocLayerMemory();
+
+	mp_netParam = new NetParam(gi_batchSize, gi_fragmentNumber, gi_totalTrainBatchNumber, mv_layerVec.size());
+	mp_sync = new ThreadSynchronizer(mv_zeroThreadVec.size() + 1);
+	//first batch
+	mi_executedBatchNumber = 0;
+	mq_netMsgQue.enqueue(new ZeroMessage(NET_CAN_FPROP));
+
+}
+ZeroNet::~ZeroNet() {
+
+	LOG_IF(INFO,gb_logFlag) << __func__;
+	for (vector<Layer*>::iterator layerIt = mv_layerVec.begin(); layerIt != mv_layerVec.end(); ++layerIt) {
+		if (*layerIt != NULL) {
+			delete *layerIt;
+			*layerIt = NULL;
+		}
+	}
+
+	for (vector<LayerParam*>::iterator layerParamIt = mv_layerParamVec.begin(); layerParamIt != mv_layerParamVec.end(); ++layerParamIt) {
+		if (*layerParamIt != NULL) {
+			delete *layerParamIt;
+			*layerParamIt = NULL;
+		}
+	}
+
+	for (vector<ZeroThread*>::iterator zeroThreadIt = mv_zeroThreadVec.begin(); zeroThreadIt != mv_zeroThreadVec.end(); ++zeroThreadIt) {
+		(*zeroThreadIt)->getMsgQueue().enqueue(new ZeroMessage(LAYER_CAN_EXIT));
+		(*zeroThreadIt)->join();
+		delete *zeroThreadIt;
+		*zeroThreadIt = NULL;
+	}
+	delete mp_sync;
+	delete mp_netParam;
+	LOG_IF(INFO,gb_logFlag) << "~ZeroNet()------------------END";
+
+}
+
+void ZeroNet::CreateLayers() {
+
+	int gpu0 = 0;
+	int gpu1 = 1;
+	int layerId=0;
+	LayerParam* dataLayerParam = new LayerParam(layerId++, "data", LAYER_TYPE_INPUT, gi_datachannel_out, gpu0);
+	LayerParam* conv1LayerParam =new LayerParam(layerId++,"conv1",LAYER_TYPE_INPUT,gi_conv1_out,gpu0);
+	LayerParam* fc1LayerParam = new LayerParam(layerId++, "fc1", LAYER_TYPE_FULL, gi_fc1_out, gpu0);
+	LayerParam* fc2LayerParam = new LayerParam(layerId++, "fc2", LAYER_TYPE_FULL, gi_fc2_out, gpu0);
+	LayerParam* fc3LayerParam = new LayerParam(layerId++, "fc3", LAYER_TYPE_FULL, gi_fc3_out, gpu1);
+	LayerParam* reLU3LayerParam = new LayerParam(layerId++, "relu3", LAYER_TYPE_RELU, gi_fc3_out, gpu1);
+	LayerParam* fc4LayerParam = new LayerParam(layerId++, "fc4", LAYER_TYPE_FULL, gi_fc4_out, gpu1);
+	LayerParam* softmaxLayerParam = new LayerParam(layerId++, "softmax", LAYER_TYPE_SOFTMAX, gi_fc4_out, gpu1);
+
+	mv_layerParamVec.push_back(dataLayerParam);
+	mv_layerParamVec.push_back(conv1LayerParam);
+	mv_layerParamVec.push_back(fc1LayerParam);
+	mv_layerParamVec.push_back(fc2LayerParam);
+	mv_layerParamVec.push_back(fc3LayerParam);
+	mv_layerParamVec.push_back(reLU3LayerParam);
+	mv_layerParamVec.push_back(fc4LayerParam);
+	mv_layerParamVec.push_back(softmaxLayerParam);
+
+	//create layer
+	for (vector<LayerParam*>::iterator it = mv_layerParamVec.begin(); it != mv_layerParamVec.end(); ++it) {
+		ZeroThread* zeroThread = new ZeroThread(*it);
+		mv_zeroThreadVec.push_back(zeroThread);
+		mv_layerVec.push_back(zeroThread->getBindLayer());
+	}
+
+	mp_dataLayer = dynamic_cast<DataLayer*>(mv_layerVec[0]);
+	assert(mp_dataLayer!=NULL);
+
+//	Layer* layer=LayerFactory::CreateLayer(*fc1LayerParam);
+//	LOG_IF(INFO,gb_logFlag)<<"---------------------------name:"<<layer->getLayerName()<<";Id:"<<layer->getLayerId();
+
+}
+
+void ZeroNet::ConnectAdjacentLayers() {
+
+	for (unsigned int id = 0; id < mv_layerVec.size(); ++id) {
+		if (id == 0) {
+			mv_layerVec[id]->ConnectPrevLayer(NULL);
+			mv_layerVec[id]->ConnectNextLayer(mv_layerVec[id + 1]);
+			continue;
+		} else if (id == mv_layerVec.size() - 1) {
+			mv_layerVec[id]->ConnectPrevLayer(mv_layerVec[id - 1]);
+			//the next layer of the last layer is : dataLayer
+			mv_layerVec[id]->ConnectNextLayer(mv_layerVec[0]);
+			continue;
+		}
+		mv_layerVec[id]->ConnectPrevLayer(mv_layerVec[id - 1]);
+		mv_layerVec[id]->ConnectNextLayer(mv_layerVec[id + 1]);
+	}
+
+}
+
+void ZeroNet::AllocLayerMemory() {
+
+	for (unsigned int id = 0; id < mv_layerVec.size(); ++id) {
+		mv_layerVec[id]->AllocMemory();
+	}
+}
+
+void* ZeroNet::run() {
+
+	LOG_IF(INFO,gb_logFlag) << __func__;
+
+	for (vector<ZeroThread*>::iterator it = mv_zeroThreadVec.begin(); it != mv_zeroThreadVec.end(); ++it) {
+		(*it)->start();
+	}
+	bool exit = false;
+	while (!exit) {
+		ZeroMessage* m = mq_netMsgQue.dequeue();
+		MESSAGES type = m->getType();
+		if (type == NET_CAN_FPROP) {
+			NetForward();
+		} else if (type == NET_CAN_BPROP) {
+			NetBackward();
+		} else if (type == NET_CAN_UPDATE) {
+			NetParalleUpdate();
+		} else if (type == NET_CAN_SYNC) {
+			NetSyncWithChildThreads();
+		} else if (type == NET_CAN_EXIT) {
+			LOG_IF(INFO,gb_logFlag) << "EXIT_BEGIN--------------------";
+			exit = true;
+		}
+		delete m;
+	}
+	return NULL;
+}
+
+void ZeroNet::NetForward() {
+	LOG_IF(INFO,gb_logFlag) << "FPROP_BEGIN--------------------";
+	mv_zeroThreadVec[0]->getMsgQueue().enqueue(new FpropMessage(0));
+	++mi_executedBatchNumber;
+}
+
+void ZeroNet::NetBackward() {
+	LOG_IF(INFO,gb_logFlag) << "BPROP_BEGIN--------------------";
+	static int len = mv_layerVec.size();
+	mv_zeroThreadVec[len - 1]->getMsgQueue().enqueue(new BpropMessage(len - 1));
+}
+
+void ZeroNet::NetParalleUpdate() {
+	LOG_IF(INFO,gb_logFlag) << "UPDATE_BEGIN_PARALLEL--------------------";
+	for (vector<ZeroThread*>::iterator it = mv_zeroThreadVec.begin(); it != mv_zeroThreadVec.end(); ++it) {
+		(*it)->getMsgQueue().enqueue(new ZeroMessage(LAYER_CAN_UPDATE));
+	}
+	mq_netMsgQue.enqueue(new ZeroMessage(NET_CAN_SYNC));
+}
+
+void ZeroNet::NetSyncWithChildThreads() {
+	LOG_IF(INFO,gb_logFlag) << "SYNC_BEGIN--------------------";
+	for (vector<ZeroThread*>::iterator it = mv_zeroThreadVec.begin(); it != mv_zeroThreadVec.end(); ++it) {
+		(*it)->getMsgQueue().enqueue(new ZeroMessage(LAYER_CAN_SYNC));
+	}
+	mp_sync->sync();
+	static int totalBatchNumber = getNetParam()->getTotalBatchNumber();
+	LOG_IF(INFO,gb_logFlag) << "SYNC_END--------------------TotalBatchNumber:" << totalBatchNumber << ";ExecutedBatchNumber:" << mi_executedBatchNumber;
+	if (mi_executedBatchNumber != totalBatchNumber) {
+		mq_netMsgQue.enqueue(new ZeroMessage(NET_CAN_FPROP));
+	} else {
+		mq_netMsgQue.enqueue(new ZeroMessage(NET_CAN_EXIT));
+	}
+}
+
+/*
+ * ZeroThread.cpp
+ *
+ *  Created on: Dec 19, 2016
+ *      Author: zys
+ */
+ZeroThread::ZeroThread(LayerParam* layerParam) :
+		Thread(true, layerParam->getLayerName()) {
+	LOG_IF(INFO,gb_logFlag) << __func__;
+	LayerType type = layerParam->getLayerType();
+	if (type == LAYER_TYPE_INPUT) {
+		mp_bindLayer = new DataLayer(layerParam, this);
+	} else if (type == LAYER_TYPE_FULL) {
+		mp_bindLayer = new FullConnLayer(layerParam, this);
+	} else if (type == LAYER_TYPE_SOFTMAX) {
+		mp_bindLayer = new SoftmaxLayer(layerParam, this);
+	} else if (type == LAYER_TYPE_RELU) {
+		mp_bindLayer = new ReLULayer(layerParam, this);
+	} else if (type == LAYER_TYPE_CONV) {
+		mp_bindLayer = new ConvLayer(layerParam, this);
+	} else if (type == LAYER_TYPE_POOL) {
+		mp_bindLayer = new PoolLayer(layerParam, this);
+	}
+}
+
+ZeroThread::~ZeroThread() {
+	LOG_IF(INFO,gb_logFlag) << __func__;
+}
+
+void* ZeroThread::run() {
+
+	bool exit = false;
+	while (!exit) {
+		ZeroMessage* m = mq_msgQue.dequeue();
+		//LOG_IF(INFO,gb_logFlag)<<mp_bindLayer->getLayerName()<<" Len:"<<mq_msgQue.getNumElements()<<";Type:"<<m->getType();
+		MESSAGES type = m->getType();
+		if (type == LAYER_CAN_FPROP) {
+			//LOG_IF(INFO,gb_logFlag)<<mp_bindLayer->getLayerName()<<"---------FPROP_READY Type:"<<type;
+			mp_bindLayer->Forward();
+		} else if (type == LAYER_CAN_BPROP) {
+			//LOG_IF(INFO,gb_logFlag)<<mp_bindLayer->getLayerName()<<"---------BPROP_READY Type:"<<type;
+			mp_bindLayer->Backward();
+		} else if (type == LAYER_CAN_SYNC) {
+			//ZeroNet::getInstance()->getSync()->sync();
+			ZeroNet::getInstance().getSync()->sync();
+		} else if (type == LAYER_CAN_UPDATE) {
+			mp_bindLayer->Update();
+		} else if (type == LAYER_CAN_EXIT) {
+			exit = true;
+		}
+		delete m;
+	}
+	return NULL;
+}

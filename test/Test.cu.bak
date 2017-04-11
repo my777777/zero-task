@@ -1,0 +1,281 @@
+/*
+ * Test.cpp
+ *
+ *  Created on: Dec 23, 2016
+ *      Author: zys
+ */
+#include "Resource.h"
+#include <iostream>
+#include <stdlib.h>
+#include <stdio.h>
+#include <pthread.h>
+using namespace std;
+#include <omp.h>
+
+#include "ZeroTest.cuh"
+
+double* d_A;
+double* d_B;
+double* d_C;
+double *d_copyA = NULL;
+
+double* A;
+double* B;
+//
+//int M = 50 * 10; //batch_size
+//int N = 4096; //in
+//int Q = 4096; //out
+
+int M = 2; //batch_size
+int N = 3; //in
+int Q = 1; //out
+
+long size_A = (M * N); //input_data
+long size_B = (N * Q); //weight
+long size_C = (M * Q); //output_data
+
+float totalTimeUsed;
+cublasHandle_t cublasHandle;
+
+void initData() {
+
+	A = new double[size_A];
+	B = new double[size_B];
+
+	for (int i = 0; i < size_A; ++i) {
+		A[i] = rand() % size_A;
+	}
+	for (int i = 0; i < size_B; ++i) {
+		B[i] = rand() % size_B;
+	}
+
+	checkCudaErrors(cudaMalloc(&d_A, size_A * sizeof(double)));
+	checkCudaErrors(cudaMalloc(&d_copyA, size_A * sizeof(double)));
+	checkCudaErrors(cudaMalloc(&d_B, size_B * sizeof(double)));
+	checkCudaErrors(cudaMalloc(&d_C, size_C * sizeof(double)));
+
+	checkCudaErrors(cudaMemcpy(d_A, A, size_A * sizeof(double), cudaMemcpyHostToDevice));
+	checkCudaErrors(cudaMemcpy(d_B, B, size_B * sizeof(double), cudaMemcpyHostToDevice));
+	checkCudaErrors(cudaMemcpy(d_copyA, d_A, size_A * sizeof(double), cudaMemcpyDeviceToDevice));
+
+}
+
+void freeData() {
+
+	delete[] A;
+	delete[] B;
+
+	cudaFree(d_A);
+	cudaFree(d_B);
+	cudaFree(d_C);
+	cudaFree(d_copyA);
+	checkCublasErrors(cublasDestroy(cublasHandle));
+}
+
+void* func1(void*) {
+
+	LOG(INFO)<<__func__;
+
+	double* d_A;
+	double* d_B;
+	double* d_C;
+	double *d_copyA = NULL;
+
+	double* A;
+	double* B;
+
+	int M = 50 * 10; //batch_size
+	int N = 4096;//in
+	int Q = 4096;//out
+
+//	int M =2; //batch_size
+//	int N = 3; //in
+//	int Q = 1; //out
+	long size_A = (M * N);//input_data
+	long size_B = (N * Q);//weight
+	long size_C = (M * Q);//output_data
+	float totalTimeUsed;
+
+	cublasHandle_t cublasHandle;
+	checkCublasErrors(cublasCreate(&cublasHandle));
+	int nStreams=2;
+	cudaStream_t streams[nStreams];
+	for(int i=0;i<nStreams;++i) {
+		cudaStreamCreate(&streams[i]);
+	}
+
+	A = new double[size_A];
+	B = new double[size_B];
+
+	for (int i = 0; i < size_A; ++i) {
+		A[i] = i;
+	}
+	for (int i = 0; i < size_B; ++i) {
+		B[i] = i;
+	}
+
+	checkCudaErrors(cudaMalloc(&d_A, size_A * sizeof(double)));
+	checkCudaErrors(cudaMalloc(&d_B, size_B * sizeof(double)));
+	checkCudaErrors(cudaMalloc(&d_C, size_C * sizeof(double)));
+
+	checkCudaErrors(cudaMemcpy(d_A, A, size_A * sizeof(double), cudaMemcpyHostToDevice));
+	checkCudaErrors(cudaMemcpy(d_B, B, size_B * sizeof(double), cudaMemcpyHostToDevice));
+
+	double alpha = 1.0;
+	double beta = 0.0;
+	cudaEvent_t start, stop;
+	checkCudaErrors(cudaEventCreate(&start));
+	checkCudaErrors(cudaEventCreate(&stop));
+	checkCudaErrors(cudaEventRecord(start, 0));
+	checkCublasErrors(cublasDgemm(cublasHandle, CUBLAS_OP_N, CUBLAS_OP_N, Q, M, N, &alpha, d_B, Q, d_A, N, &beta, d_C, Q));
+	checkCudaErrors(cudaEventRecord(stop, 0));
+	checkCudaErrors(cudaEventSynchronize(stop));
+	checkCudaErrors(cudaEventElapsedTime(&totalTimeUsed, start, stop));
+	LOG(INFO)<<M<<" "<<totalTimeUsed<<" ms";
+	checkCudaErrors(cudaEventDestroy(start));
+	checkCudaErrors(cudaEventDestroy(stop));
+
+	double* outData=new double[size_C];
+	checkCudaErrors(cudaMemcpy(outData, d_C, size_C * sizeof(double), cudaMemcpyDeviceToHost));
+	for(int i=0;i<size_C;++i) {
+		cout<<outData[i]<<" ";
+	}
+	cout<<endl;
+	delete[] outData;
+
+	delete[] A;
+	delete[] B;
+
+	cudaFree(d_A);
+	cudaFree(d_B);
+	cudaFree(d_C);
+	checkCublasErrors(cublasDestroy(cublasHandle));
+
+	return NULL;
+
+}
+
+void* func2(void*) {
+
+	LOG(INFO)<<__func__;
+
+	double alpha = 1.0;
+	double beta = 0.0;
+	cudaEvent_t start, stop;
+	checkCudaErrors(cudaEventCreate(&start));
+	checkCudaErrors(cudaEventCreate(&stop));
+	checkCudaErrors(cudaEventRecord(start, 0));
+	checkCublasErrors(cublasDgemm(cublasHandle, CUBLAS_OP_N, CUBLAS_OP_N, Q, M, N, &alpha, d_B, Q, d_copyA, N, &beta, d_C, Q));
+	checkCudaErrors(cudaEventRecord(stop, 0));
+	checkCudaErrors(cudaEventSynchronize(stop));
+	checkCudaErrors(cudaEventElapsedTime(&totalTimeUsed, start, stop));
+	LOG(INFO)<<M<<" "<<totalTimeUsed<<" ms";
+	checkCudaErrors(cudaEventDestroy(start));
+	checkCudaErrors(cudaEventDestroy(stop));
+
+	return NULL;
+}
+
+void testKernels() {
+
+	LOG(INFO)<<"testKernels_BEGIN";
+
+	pthread_t t1,t2;
+	pthread_t t3,t4;
+	int ret;
+	ret = pthread_create(&t1, NULL, func1, NULL);
+	if (ret != 0) {
+		LOG(INFO)<<"Error";
+	}
+
+	ret = pthread_create(&t2, NULL, func2, NULL);
+	if (ret != 0) {
+		LOG(INFO)<<"Error";
+	}
+
+	pthread_join(t1,NULL);
+	pthread_join(t2,NULL);
+
+//
+//	ret = pthread_create(&t3, NULL, func1, NULL);
+//	if (ret != 0) {
+//		LOG(INFO)<<"Error";
+//	}
+//	pthread_join(t3,NULL);
+//
+////	ret = pthread_create(&t4, NULL, func2, NULL);
+////	if (ret != 0) {
+////		LOG(INFO)<<"Error";
+////	}
+////	pthread_join(t4,NULL);
+
+	LOG(INFO)<<"testKernels_END";
+}
+
+#define USE_SINGLE_STREAM
+
+int main(int argc, char *argv[]) {
+
+	//testKernels();
+
+	int nStreams = 2;
+	long n = 1024;
+	long size = n * sizeof(int);
+
+	cudaStream_t streams[nStreams];
+	int *d_A[nStreams];
+	for (int i = 0; i < nStreams; ++i) {
+		cudaMalloc(&d_A[i], size);
+		cudaStreamCreate(&streams[i]);
+	}
+
+	int *h_A;
+	cudaHostAlloc(&h_A, nStreams * size, cudaHostAllocPortable);
+
+	int nThreadsPerBlock = 512;
+	int nBlocks = n / nThreadsPerBlock + ((n % nThreadsPerBlock) ? 1 : 0);
+	double startTime = omp_get_wtime();
+//	for (int i = 0; i < nStreams; ++i) {
+//		for (int j = 0; j < 100000; j++) {
+//#ifdef USE_SINGLE_STREAM
+//			fillKernel<<<nBlocks,nThreadsPerBlock>>>(d_A[i],n,i*n);
+//			//cout<<"USE_SINGLE_STREAM"<<endl;
+//#else
+//			fillKernel<<<nBlocks,nThreadsPerBlock,0,streams[i]>>>(d_A[i],n,i*n);
+//			//cout<<"NOT USE_SINGLE_STREAM"<<endl;
+//#endif
+//		}
+//	}
+
+	for(int i=0;i<100000;++i){
+#ifdef USE_SINGLE_STREAM
+	fillKernel<<<nBlocks,nThreadsPerBlock>>>(d_A[0],n,i*n);
+	fillKernel2<<<nBlocks,nThreadsPerBlock>>>(d_A[1],n,i*n);
+#else
+	fillKernel<<<nBlocks,nThreadsPerBlock,0,streams[0]>>>(d_A[0],n,i*n);
+	fillKernel2<<<nBlocks,nThreadsPerBlock,0,streams[1]>>>(d_A[1],n,i*n);
+#endif
+	}
+	cudaDeviceSynchronize();
+	double endTime = omp_get_wtime();
+	cout << "Runtime:" << endTime - startTime << endl;
+
+	for (int i = 0; i < nStreams; ++i) {
+		cudaMemcpyAsync(&h_A[i * n], d_A[i], size, cudaMemcpyDefault, streams[i]);
+	}
+	cudaDeviceSynchronize();
+
+	for (int i = 0; i < nStreams * n; ++i) {
+		if (h_A[i] != i) {
+			cout << "Error" << endl;
+			exit(1);
+		}
+	}
+	cout << "Success" << endl;
+
+	for (int i = 0; i < nStreams; ++i) {
+		cudaFree(streams[i]);
+	}
+	return 0;
+}
+
